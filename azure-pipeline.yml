@@ -1,0 +1,147 @@
+name: $(date:yyyyMMdd)$(rev:.r)
+
+trigger:
+- main 
+
+parameters:
+- name: devResourceGroupName
+  displayName: 'Resource group name'
+  type: string
+  default: 'poc001'
+- name: create_WindowsBatchPool
+  displayName: 'Create Windows Batch Pool'
+  type: boolean
+  default: false
+- name: create_UbuntuBatchPool
+  displayName: 'Create Ubuntu Batch Pool'
+  type: boolean
+  default: false
+
+variables:
+  azureSubscription: 'MSDN_OP'
+  dockerRegistryServiceConnection: 'presazurebatchacr'
+  buildConfiguration: 'Release'
+  projectName: 'PresAzureBatch'
+  infraPath: '$(Build.SourcesDirectory)/arm/'
+  projectPath: 'dotnet/$(projectName)/$(projectName).csproj'
+
+stages:
+- stage: 'Build'
+  displayName: 'Build ConsoleApp'
+  jobs:
+  - job: BuildConsoleApp
+    displayName: Build ConsoleApp
+    cancelTimeoutInMinutes: 1
+    pool:
+      vmImage: 'windows-2022'
+    steps:
+    - checkout: self
+      clean: true
+    - task: gittools.usegitversion.gitversion-task.UseGitVersion@5
+      displayName: GitVersion
+      inputs:
+        versionSpec: 5.6.x              
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore packages of the $(projectName) consoleapp'
+      inputs:
+        command: restore
+        projects: $(projectPath)
+        feedsToUse: config
+        nugetConfigPath: NuGet.Config
+    - task: DotNetCoreCLI@2
+      displayName: 'Build the $(projectName) consoleapp'
+      inputs:
+        projects: '$(projectPath)'
+        arguments: '-c $(buildConfiguration) --no-restore'
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish and Zip the $(projectName) consoleapp'
+      inputs:
+        command: publish
+        publishWebProjects: false
+        projects: '$(projectPath)'
+        arguments: '-o $(Build.ArtifactStagingDirectory)/consoleapp -c $(buildConfiguration) --no-build'
+        zipAfterPublish: true
+    - task: CopyFiles@2
+      inputs:
+        contents: 'dockerfile.windows'
+        targetFolder: $(Build.ArtifactStagingDirectory)
+    - task: CopyFiles@2
+      inputs:
+        contents: 'dockerfile.ubuntu'
+        targetFolder: $(Build.ArtifactStagingDirectory)
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: drop'
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'Schedule'))
+
+- stage: 'BuildImage'
+  displayName: 'Build Docker Image'
+  dependsOn: Build
+  jobs:
+  - deployment: BuildUbuntuImage
+    displayName: Build Ubuntu Image
+    environment: Docker
+    pool:
+      vmImage: 'ubuntu-latest'
+    workspace:
+      clean: all
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: ExtractFiles@1
+            inputs:
+              archiveFilePatterns: '$(Pipeline.Workspace)/drop/consoleapp/*.zip'
+              destinationFolder: '$(Pipeline.Workspace)/drop/extract'
+              cleanDestinationFolder: true
+              overwriteExistingFiles: false                   
+          - task: Docker@2
+            displayName: Build and push an image to container registry
+            inputs:
+              command: buildAndPush
+              repository: demo-ubuntu
+              dockerfile: '$(Pipeline.Workspace)/drop/dockerfile.ubuntu'
+              containerRegistry: $(dockerRegistryServiceConnection)
+              tags: $(Build.BuildNumber)
+          - task: Docker@2
+            displayName: Build and push an image to container registry
+            inputs:
+              command: buildAndPush
+              repository: demo-ubuntu
+              dockerfile: '$(Pipeline.Workspace)/drop/dockerfile.ubuntu'
+              containerRegistry: $(dockerRegistryServiceConnection)
+              tags: latest
+
+  - deployment: BuildWindowsImage
+    displayName: Build Windows Image
+    environment: Docker
+    pool:
+      vmImage: 'windows-latest'
+    workspace:
+      clean: all
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: ExtractFiles@1
+            inputs:
+              archiveFilePatterns: '$(Pipeline.Workspace)/drop/consoleapp/*.zip'
+              destinationFolder: '$(Pipeline.Workspace)/drop/extract'
+              cleanDestinationFolder: true
+              overwriteExistingFiles: false                    
+          - task: Docker@2
+            displayName: Build and push an image to container registry
+            inputs:
+              command: buildAndPush
+              repository: demo-windows
+              dockerfile: '$(Pipeline.Workspace)/drop/dockerfile.windows'
+              containerRegistry: $(dockerRegistryServiceConnection)
+              tags: $(Build.BuildNumber)
+          - task: Docker@2
+            displayName: Build and push an image to container registry
+            inputs:
+              command: buildAndPush
+              repository: demo-windows
+              dockerfile: '$(Pipeline.Workspace)/drop/dockerfile.windows'
+              containerRegistry: $(dockerRegistryServiceConnection)
+              tags: latest
+
